@@ -1,0 +1,25 @@
+[Unit]
+Description=RPZ-IR-Sensor FastAPI service
+After=network.target
+
+[Service]
+Type=simple
+User=ops
+Group=ops
+SupplementaryGroups=i2c video
+WorkingDirectory=/home/ops/rpz-ir-sensor-api
+EnvironmentFile=/etc/rpz-ir-sensor-api.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ops/rpz-ir-sensor-api/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=35
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/rpz-ir-sensor-api
+
+[Install]
+WantedBy=multi-user.target
