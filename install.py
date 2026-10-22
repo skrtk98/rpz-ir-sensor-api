@@ -53,7 +53,7 @@ except KeyError:
 service = pwd.getpwnam(SERVICE_USER)
 # The checkout and its virtualenv (including the interpreter it links to) must be readable by the service.
 subprocess.run(['runuser', '-u', SERVICE_USER, '--', str(repo / '.venv/bin/python'), '-c', 'import uvicorn, app'],
-               cwd=repo, env={'RPZ_SAMPLE_SECONDS': '0'}, check=True)
+               cwd=repo, check=True)
 
 run('install', '-m', '644', str(repo / '99-rpz-ir-sensor.rules'), '/etc/udev/rules.d/99-rpz-ir-sensor.rules')
 run('udevadm', 'control', '--reload-rules')
