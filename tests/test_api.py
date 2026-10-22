@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -44,7 +46,7 @@ def test_unsafe_pulses_rejected(client, pulses):
 
 
 def test_ir_busy_does_not_block_sensor_reads(client, monkeypatch):
-    monkeypatch.setattr(api, "read_environment", lambda: {"temperature_c": 24})
+    monkeypatch.setattr(api, "read_environment", lambda: {"temperature_c": 24, "address": "0x76"})
     monkeypatch.setattr(api, "read_light", lambda: {"illuminance_lux": 100})
     with api.ir_lock:
         assert client.post("/ir/receive", json={"timeout_seconds": 1}).status_code == 409
@@ -106,30 +108,64 @@ def test_absolute_receive_deadline(monkeypatch):
     assert error.value.status_code == 408
 
 
-def test_sampling_records_history(client, monkeypatch):
-    monkeypatch.setattr(api, "read_environment", lambda: {"temperature_c": 24.123, "humidity_percent": 50,
-                                                          "pressure_hpa": 1013, "address": "0x76"})
-    monkeypatch.setattr(api, "read_light", lambda: {"illuminance_lux": 100, "sensor": "TSL2572"})
-    api.sample_once()
-    result = client.get("/sensors/history", params={"hours": 1}).json()
-    assert result["latest"]["temperature_c"] == 24.12
-    assert result["readings"][0]["illuminance_lux"] == 100
-    assert client.get("/sensors/history", headers={"X-API-Key": "wrong"}).status_code == 401
+def fake_sensors(monkeypatch, environments, light=100):
+    """environments maps address -> temperature, or to an exception to raise."""
+    def read_environment(address=None):
+        address = address or os.environ.get("RPZ_BME280_ADDRESS", "0x77")
+        value = environments[address]
+        if isinstance(value, Exception):
+            raise value
+        return {"temperature_c": value, "humidity_percent": 50, "pressure_hpa": 1013, "address": address}
+
+    def read_light():
+        if isinstance(light, Exception):
+            raise light
+        return {"illuminance_lux": light, "sensor": "TSL2572"}
+
+    monkeypatch.setattr(api, "read_environment", read_environment)
+    monkeypatch.setattr(api, "read_light", read_light)
 
 
-def test_failed_sensor_is_stored_as_null(client, monkeypatch):
-    def broken():
-        raise OSError("device missing")
+def test_labels_select_and_name_recorded_sensors(client, monkeypatch):
+    monkeypatch.setenv("RPZ_SENSOR_LABELS", "0x77=室内, 0x76=屋外,0x39=室内")
+    monkeypatch.setenv("RPZ_BME280_ADDRESS", "0x76")
+    fake_sensors(monkeypatch, {"0x76": 12.345, "0x77": 28})
+    catalog = client.get("/sensors/labels", headers={"X-API-Key": "read-key"}).json()["sensors"]
+    assert [(s["address"], s["type"], s["label"]) for s in catalog] == [
+        ("0x77", "BME280", "室内"), ("0x76", "BME280", "屋外"), ("0x39", "TSL2572", "室内")]
+    api.sample_once()
+    sensors = {s["address"]: s for s in client.get("/sensors/history", params={"hours": 1}).json()["sensors"]}
+    assert sensors["0x76"]["label"] == "屋外"
+    assert sensors["0x76"]["latest"]["temperature_c"] == 12.35
+    assert sensors["0x77"]["readings"][0]["temperature_c"] == 28
+    assert sensors["0x39"]["latest"]["illuminance_lux"] == 100
+    assert "illuminance_lux" not in sensors["0x76"]["latest"]
+    assert client.get("/sensors/environment", params={"address": "0x76"}).json()["label"] == "屋外"
+    assert client.get("/sensors/light").json()["label"] == "室内"
+    assert client.get("/sensors").json()["labels"] == {"environment": "屋外", "light": "室内"}
 
-    monkeypatch.setattr(api, "read_environment", broken)
-    monkeypatch.setattr(api, "read_light", lambda: {"illuminance_lux": 5})
+
+def test_default_catalog_records_configured_address(client, monkeypatch):
+    monkeypatch.setenv("RPZ_BME280_ADDRESS", "0x76")
+    labels = client.get("/sensors/labels").json()["sensors"]
+    assert [(s["address"], s["label"]) for s in labels] == [("0x76", "外付け"), ("0x39", "基板上")]
+
+
+@pytest.mark.parametrize("value", ["0x40=屋外", "0x76=", "屋外", "0x76=a,0x77=a"])
+def test_invalid_labels_are_rejected(monkeypatch, value):
+    monkeypatch.setenv("RPZ_SENSOR_LABELS", value)
+    with pytest.raises(ValueError):
+        api.sensor_catalog()
+
+
+def test_failed_sensor_is_skipped(client, monkeypatch):
+    monkeypatch.setenv("RPZ_SENSOR_LABELS", "0x76=屋外,0x77=室内")
+    fake_sensors(monkeypatch, {"0x76": OSError("unplugged"), "0x77": 25}, light=OSError("busy"))
     api.sample_once()
-    latest = client.get("/sensors/history").json()["latest"]
-    assert latest["temperature_c"] is None and latest["illuminance_lux"] == 5
-    monkeypatch.setattr(api, "read_light", broken)
-    monkeypatch.setattr(api.time, "time", lambda: 2_000_000_000)
-    api.sample_once()
-    assert client.get("/sensors/history").json()["latest"]["illuminance_lux"] == 5
+    sensors = {s["address"]: s for s in client.get("/sensors/history").json()["sensors"]}
+    assert sensors["0x76"]["latest"] is None and sensors["0x76"]["readings"] == []
+    assert sensors["0x77"]["latest"]["temperature_c"] == 25
+    assert sensors["0x39"]["latest"] is None
     assert not api.sensor_lock.locked()
 
 
@@ -137,18 +173,34 @@ def test_history_buckets_and_retention(client, monkeypatch):
     now = 1_800_000_000
     monkeypatch.setattr(api.time, "time", lambda: now)
     monkeypatch.setenv("RPZ_RETENTION_DAYS", "1")
+    monkeypatch.setenv("RPZ_SENSOR_LABELS", "0x76=屋外")
     with api.connection() as conn:
-        conn.executemany("INSERT INTO readings VALUES (?, ?, NULL, NULL, NULL)",
+        conn.executemany("INSERT INTO environment_readings VALUES (?, '0x76', ?, NULL, NULL)",
                          [(now - 3 * 86400, 0)] + [(now - 3600 + i * 60, i) for i in range(60)])
     result = client.get("/sensors/history", params={"hours": 1, "points": 10}).json()
     assert result["bucket_seconds"] == 360
-    assert len(result["readings"]) <= 11
-    assert sum(r["temperature_c"] for r in result["readings"]) > 0
-    monkeypatch.setattr(api, "read_environment", lambda: {"temperature_c": 20})
-    monkeypatch.setattr(api, "read_light", dict)
+    readings = result["sensors"][0]["readings"]
+    assert len(readings) <= 11 and sum(r["temperature_c"] for r in readings) > 0
+    fake_sensors(monkeypatch, {"0x76": 20})
     api.sample_once()
     with api.connection() as conn:
-        assert conn.execute("SELECT MIN(ts) FROM readings").fetchone()[0] > now - 86400
+        assert conn.execute("SELECT MIN(ts) FROM environment_readings").fetchone()[0] > now - 86400
+
+
+def test_old_readings_are_migrated(monkeypatch, tmp_path):
+    monkeypatch.setenv("RPZ_DB", str(tmp_path / "old.sqlite3"))
+    monkeypatch.setenv("RPZ_BME280_ADDRESS", "0x76")
+    with api.connection() as conn:
+        conn.execute("CREATE TABLE readings (ts INTEGER PRIMARY KEY, temperature_c REAL, "
+                     "humidity_percent REAL, pressure_hpa REAL, illuminance_lux REAL)")
+        conn.executemany("INSERT INTO readings VALUES (?, ?, ?, ?, ?)",
+                         [(1, 20, 50, 1013, 5), (2, None, None, None, 6), (3, 21, 51, 1012, None)])
+        api.migrate_readings(conn)
+        assert conn.execute("SELECT ts, address, temperature_c FROM environment_readings ORDER BY ts").fetchall() == [
+            (1, "0x76", 20), (3, "0x76", 21)]
+        assert conn.execute("SELECT * FROM light_readings ORDER BY ts").fetchall() == [(1, 5), (2, 6)]
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name='readings'").fetchone() is None
+        api.migrate_readings(conn)  # idempotent once the old table is gone
 
 
 def test_sampling_waits_out_busy_sensors(monkeypatch):

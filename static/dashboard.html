@@ -16,6 +16,8 @@
   --text-secondary: #52514e;
   --text-muted: #77766f;
   --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
   --accent: #2a78d6;
   --critical: #c62f2f;
 }
@@ -30,6 +32,8 @@
     --text-secondary: #c3c2b7;
     --text-muted: #9a998f;
     --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
     --accent: #3987e5;
     --critical: #e66767;
   }
@@ -44,6 +48,8 @@
   --text-secondary: #c3c2b7;
   --text-muted: #9a998f;
   --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
   --accent: #3987e5;
   --critical: #e66767;
 }
@@ -68,8 +74,18 @@ button {
   font: inherit; color: var(--text-primary); background: var(--surface-1);
   border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; cursor: pointer;
 }
-.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.label-filter { display: flex; flex-wrap: wrap; gap: 8px; }
+.label-filter label {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px;
+}
+.swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; display: inline-block; }
+.groups { display: grid; gap: 12px; margin-bottom: 16px; }
+.group h2 { display: flex; align-items: center; gap: 8px; font-size: 15px; margin: 0 0 8px; }
+.group .stale { color: var(--critical); font-size: 12px; font-weight: 400; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; min-width: 0; }
+.tile { background: var(--surface-0); border-radius: 8px; padding: 8px 12px; min-width: 0; }
 .tile .label { color: var(--text-secondary); font-size: 13px; }
 .tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tile .unit { font-size: 15px; font-weight: 400; color: var(--text-secondary); margin-left: 4px; }
@@ -110,9 +126,10 @@ dialog input { width: 100%; font: inherit; padding: 6px 8px; margin: 8px 0 12px;
       <button type="button" data-hours="720">30日</button>
       <button type="button" data-hours="2160">90日</button>
     </div>
+    <div class="label-filter" id="label-filter" role="group" aria-label="表示するラベル"></div>
     <button type="button" id="change-key">APIキー</button>
   </div>
-  <section class="tiles" id="tiles" aria-label="最新の測定値"></section>
+  <section class="groups" id="groups" aria-label="ラベルごとの最新値"></section>
   <section class="charts" id="charts" aria-label="推移"></section>
   <details id="table-view">
     <summary>表で見る</summary>
@@ -132,14 +149,14 @@ dialog input { width: 100%; font: inherit; padding: 6px 8px; margin: 8px 0 12px;
 <script src="/static/vendor/uPlot.iife.min.js"></script>
 <script>
 "use strict";
-const FIELDS = [
+const METRICS = [
   { key: "temperature_c", label: "温度", unit: "°C", digits: 1 },
   { key: "humidity_percent", label: "湿度", unit: "%", digits: 1 },
   { key: "pressure_hpa", label: "気圧", unit: "hPa", digits: 1 },
   { key: "illuminance_lux", label: "照度", unit: "lx", digits: 0 },
 ];
-const KEY_STORE = "rpz-api-key", RANGE_STORE = "rpz-range-hours";
-const REFRESH_MS = 60_000;
+const KEY_STORE = "rpz-api-key", RANGE_STORE = "rpz-range-hours", HIDDEN_STORE = "rpz-hidden-labels";
+const REFRESH_MS = 60_000, STALE_MS = 5 * 60_000;
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -148,12 +165,21 @@ const store = {
 
 let apiKey = store.get(KEY_STORE) || "";
 let hours = Number(store.get(RANGE_STORE)) || 24;
+let hidden = new Set();
+try { hidden = new Set(JSON.parse(store.get(HIDDEN_STORE) || "[]")); } catch { /* ignore a corrupt value */ }
 let last = null;
 let plots = [];
 
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d) => (v == null ? "--" : v.toFixed(d));
 const timeFmt = new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
 
 function setStatus(text, error = false) {
   $("status").textContent = text;
@@ -202,41 +228,86 @@ async function load() {
   render();
 }
 
-function columns(data) {
-  // Break the line where samples are missing instead of drawing across the gap.
-  const xs = [], ys = FIELDS.map(() => []);
-  let prev = null;
-  for (const r of data.readings) {
-    const t = Date.parse(r.measured_at) / 1000;
-    if (prev != null && t - prev > data.bucket_seconds * 2.5) {
-      xs.push(prev + data.bucket_seconds);
-      ys.forEach((y) => y.push(null));
-    }
-    xs.push(t);
-    FIELDS.forEach((f, i) => ys[i].push(r[f.key]));
-    prev = t;
-  }
-  return [xs, ys];
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-function renderTiles(latest) {
-  $("tiles").replaceChildren(...FIELDS.map((f) => {
-    const el = document.createElement("div");
-    el.className = "card tile";
-    const v = latest ? latest[f.key] : null;
-    el.innerHTML = `<div class="label"></div><div class="value"></div>`;
-    el.querySelector(".label").textContent = f.label;
-    el.querySelector(".value").textContent = fmt(v, f.digits);
-    const u = document.createElement("span");
-    u.className = "unit";
-    u.textContent = f.unit;
-    el.querySelector(".value").append(u);
-    return el;
+// Labels in catalog order. A label keeps its color whichever labels are hidden.
+function labelsOf(data) {
+  return [...new Set(data.sensors.map((s) => s.label))];
+}
+
+function colorOf(label) {
+  return css(`--series-${labelsOf(last).indexOf(label) + 1}`);
+}
+
+function renderFilter(labels) {
+  $("label-filter").replaceChildren(...labels.map((label) => {
+    const item = el("label");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = !hidden.has(label);
+    box.addEventListener("change", () => {
+      if (box.checked) hidden.delete(label); else hidden.add(label);
+      store.set(HIDDEN_STORE, JSON.stringify([...hidden]));
+      render();
+    });
+    const swatch = el("span", "swatch");
+    swatch.style.background = colorOf(label);
+    item.append(box, swatch, label);
+    return item;
   }));
 }
 
-function css(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function renderGroups(labels) {
+  $("groups").replaceChildren(...labels.map((label) => {
+    const sensors = last.sensors.filter((s) => s.label === label);
+    const group = el("div", "card group");
+    const title = el("h2");
+    const swatch = el("span", "swatch");
+    swatch.style.background = colorOf(label);
+    title.append(swatch, label);
+    const stale = sensors.filter((s) => !s.latest || Date.now() - Date.parse(s.latest.measured_at) > STALE_MS);
+    if (stale.length) title.append(el("span", "stale", `${stale.map((s) => s.type).join("・")}の記録が5分以上ありません`));
+    const tiles = el("div", "tiles");
+    for (const m of METRICS) {
+      const sensor = sensors.find((s) => s.metrics.includes(m.key));
+      if (!sensor) continue;
+      const tile = el("div", "tile");
+      const value = el("div", "value", fmt(sensor.latest ? sensor.latest[m.key] : null, m.digits));
+      value.append(el("span", "unit", m.unit));
+      tile.append(el("div", "label", m.label), value);
+      tiles.append(tile);
+    }
+    group.append(title, tiles);
+    return group;
+  }));
+}
+
+function series(metric, labels) {
+  // Buckets start on the same boundaries for every sensor, so their times line up across series.
+  const sensors = last.sensors.filter((s) => s.metrics.includes(metric) && labels.includes(s.label));
+  const byTime = new Map();
+  sensors.forEach((s, i) => {
+    for (const r of s.readings) {
+      const t = Date.parse(r.measured_at) / 1000;
+      if (!byTime.has(t)) byTime.set(t, sensors.map(() => null));
+      byTime.get(t)[i] = r[metric];
+    }
+  });
+  const xs = [], ys = sensors.map(() => []);
+  let prev = null;
+  for (const t of [...byTime.keys()].sort((a, b) => a - b)) {
+    // Break lines where nothing was recorded instead of drawing across the gap.
+    if (prev != null && t - prev > last.bucket_seconds * 2.5) {
+      xs.push(prev + last.bucket_seconds);
+      ys.forEach((y) => y.push(null));
+    }
+    xs.push(t);
+    byTime.get(t).forEach((v, i) => ys[i].push(v));
+    prev = t;
+  }
+  return { sensors, data: [xs, ...ys] };
 }
 
 function tick(incr) {
@@ -248,69 +319,94 @@ function tick(incr) {
   };
 }
 
-function plotOptions(f, width) {
-  const color = css("--series-1"), axis = css("--text-secondary"), grid = css("--grid");
+function plotOptions(m, sensors, width) {
+  const axis = css("--text-secondary"), grid = css("--grid");
   const axisStyle = { stroke: axis, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid, width: 1 } };
+  const single = sensors.length === 1;
   return {
     width, height: 220,
     cursor: { sync: { key: "rpz" }, points: { size: 8 }, drag: { x: false, y: false } },
     scales: { x: { time: true } },
     axes: [
       { ...axisStyle, values: (u, splits, ax, space, incr) => splits.map(tick(incr)) },
-      { ...axisStyle, size: 64, values: (u, vals) => vals.map((v) => v.toFixed(f.digits)) },
+      { ...axisStyle, size: 64, values: (u, vals) => vals.map((v) => v.toFixed(m.digits)) },
     ],
     series: [
       { label: "時刻", value: (u, v) => (v == null ? "--" : timeFmt.format(new Date(v * 1000))) },
-      {
-        label: `${f.label} (${f.unit})`, stroke: color, width: 2, fill: color + "1a",
-        points: { show: false }, spanGaps: false,
-        value: (u, v) => (v == null ? "--" : `${v.toFixed(f.digits)} ${f.unit}`),
-      },
+      ...sensors.map((s) => {
+        const color = colorOf(s.label);
+        return {
+          label: s.label, stroke: color, width: 2, fill: single ? color + "1a" : undefined,
+          points: { show: false }, spanGaps: false,
+          value: (u, v) => (v == null ? "--" : `${v.toFixed(m.digits)} ${m.unit}`),
+        };
+      }),
     ],
   };
 }
 
-function renderCharts(xs, ys) {
+function renderCharts(labels) {
   plots.forEach((p) => p.destroy());
   plots = [];
   const container = $("charts");
   container.replaceChildren();
-  FIELDS.forEach((f, i) => {
-    const card = document.createElement("div");
-    card.className = "card chart";
-    const h = document.createElement("h2");
-    h.textContent = `${f.label}（${f.unit}）`;
-    const plot = document.createElement("div");
-    plot.className = "plot";
-    card.append(h, plot);
+  for (const m of METRICS) {
+    const { sensors, data } = series(m.key, labels);
+    if (!sensors.length) continue;
+    const card = el("div", "card chart");
+    const plot = el("div", "plot");
+    card.append(el("h2", null, `${m.label}（${m.unit}）`), plot);
     container.append(card);
-    plots.push(new uPlot(plotOptions(f, plot.clientWidth), [xs, ys[i]], plot));
-  });
+    plots.push(new uPlot(plotOptions(m, sensors, plot.clientWidth), data, plot));
+  }
 }
 
-function renderTable(data) {
-  const head = `<thead><tr><th>時刻</th>${FIELDS.map((f) => `<th>${f.label} (${f.unit})</th>`).join("")}</tr></thead>`;
-  const rows = data.readings.slice().reverse().map((r) =>
-    `<tr><td>${timeFmt.format(new Date(r.measured_at))}</td>${FIELDS.map((f) => `<td>${fmt(r[f.key], f.digits)}</td>`).join("")}</tr>`);
-  $("table").innerHTML = head + `<tbody>${rows.join("")}</tbody>`;
+function renderTable(labels) {
+  const columns = last.sensors.filter((s) => labels.includes(s.label))
+    .flatMap((s) => METRICS.filter((m) => s.metrics.includes(m.key)).map((m) => ({ s, m })));
+  const rows = new Map();
+  for (const { s, m } of columns) {
+    for (const r of s.readings) {
+      if (!rows.has(r.measured_at)) rows.set(r.measured_at, new Map());
+      rows.get(r.measured_at).set(`${s.address}/${m.key}`, r[m.key]);
+    }
+  }
+  const table = $("table");
+  const head = el("tr");
+  head.append(el("th", null, "時刻"), ...columns.map(({ s, m }) => el("th", null, `${s.label} ${m.label} (${m.unit})`)));
+  const body = el("tbody");
+  for (const t of [...rows.keys()].sort().reverse()) {
+    const tr = el("tr");
+    tr.append(el("td", null, timeFmt.format(new Date(t))),
+      ...columns.map(({ s, m }) => el("td", null, fmt(rows.get(t).get(`${s.address}/${m.key}`), m.digits))));
+    body.append(tr);
+  }
+  const thead = el("thead");
+  thead.append(head);
+  table.replaceChildren(thead, body);
 }
 
 function render() {
   if (!last) return;
-  const [xs, ys] = columns(last);
-  renderTiles(last.latest);
-  renderCharts(xs, ys);
-  if ($("table-view").open) renderTable(last);
-  if (!last.latest) {
+  const all = labelsOf(last);
+  const labels = all.filter((l) => !hidden.has(l));
+  renderFilter(all);
+  renderGroups(labels);
+  renderCharts(labels);
+  if ($("table-view").open) renderTable(labels);
+  const times = last.sensors.filter((s) => s.latest).map((s) => Date.parse(s.latest.measured_at));
+  if (!times.length) {
     setStatus("まだ記録がありません");
   } else {
-    const at = new Date(last.latest.measured_at);
+    const at = new Date(Math.max(...times));
     const minutes = Math.round((Date.now() - at) / 60000);
     setStatus(`最終記録 ${timeFmt.format(at)}（${minutes <= 0 ? "1分以内" : minutes + "分前"}）`, minutes > 5);
   }
 }
 
-$("table-view").addEventListener("toggle", () => { if ($("table-view").open && last) renderTable(last); });
+$("table-view").addEventListener("toggle", () => {
+  if ($("table-view").open && last) renderTable(labelsOf(last).filter((l) => !hidden.has(l)));
+});
 new ResizeObserver(() => {
   plots.forEach((p) => p.setSize({ width: p.root.parentElement.clientWidth, height: 220 }));
 }).observe($("charts"));

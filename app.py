@@ -25,7 +25,10 @@ api_key = APIKeyHeader(name="X-API-Key", auto_error=False)
 sensor_lock = threading.Lock()
 ir_lock = threading.Lock()
 MAX_PULSES = 1023
-READING_FIELDS = ("temperature_c", "humidity_percent", "pressure_hpa", "illuminance_lux")
+ENVIRONMENT_FIELDS = ("temperature_c", "humidity_percent", "pressure_hpa")
+BME280_ADDRESSES = ("0x76", "0x77")
+LIGHT_ADDRESS = "0x39"  # TSL2572 on the board
+DEFAULT_LABELS = {"0x76": "外付け", "0x77": "基板上", LIGHT_ADDRESS: "基板上"}
 STATIC = Path(__file__).parent / "static"
 
 
@@ -47,28 +50,78 @@ def authorize_read(key: str | None = Depends(api_key)) -> None:
     check_key(key, "RPZ_API_KEY", "RPZ_READ_API_KEY")
 
 
+def configured_labels() -> dict[str, str]:
+    """Parse RPZ_SENSOR_LABELS, e.g. "0x76=屋外,0x77=室内,0x39=室内", keeping the configured order."""
+    labels = {}
+    for item in filter(None, (part.strip() for part in os.environ.get("RPZ_SENSOR_LABELS", "").split(","))):
+        address, _, label = item.partition("=")
+        try:
+            address = hex(int(address.strip(), 0))
+        except ValueError:
+            address = ""
+        if address not in DEFAULT_LABELS or not label.strip():
+            raise ValueError(f"Invalid RPZ_SENSOR_LABELS entry {item!r}; use 0x76, 0x77 or 0x39 with a label")
+        labels[address] = label.strip()
+    return labels
+
+
+def label_of(address: str) -> str:
+    return configured_labels().get(address, DEFAULT_LABELS[address])
+
+
+def sensor_catalog() -> list[dict]:
+    """Recorded sensors: every labelled BME280 (or RPZ_BME280_ADDRESS if none) plus the light sensor."""
+    labels = configured_labels()
+    addresses = [a for a in labels if a in BME280_ADDRESSES]
+    addresses = addresses or [hex(int(os.environ.get("RPZ_BME280_ADDRESS", "0x77"), 0))]
+    names = [labels.get(a, DEFAULT_LABELS[a]) for a in addresses]
+    if len(set(names)) != len(names):
+        raise ValueError("Each BME280 needs its own label in RPZ_SENSOR_LABELS")
+    return [*({"address": a, "type": "BME280", "label": n, "metrics": list(ENVIRONMENT_FIELDS)}
+              for a, n in zip(addresses, names)),
+            {"address": LIGHT_ADDRESS, "type": "TSL2572", "label": labels.get(LIGHT_ADDRESS, DEFAULT_LABELS[LIGHT_ADDRESS]),
+             "metrics": ["illuminance_lux"]}]
+
+
+def migrate_readings(conn):
+    """Move rows from the single-sensor table used before labels; they came from RPZ_BME280_ADDRESS."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='readings'").fetchone() is None:
+        return
+    address = hex(int(os.environ.get("RPZ_BME280_ADDRESS", "0x77"), 0))
+    conn.execute("INSERT OR IGNORE INTO environment_readings SELECT ts, ?, temperature_c, humidity_percent, pressure_hpa "
+                 "FROM readings WHERE COALESCE(temperature_c, humidity_percent, pressure_hpa) IS NOT NULL", (address,))
+    conn.execute("INSERT OR IGNORE INTO light_readings SELECT ts, illuminance_lux FROM readings "
+                 "WHERE illuminance_lux IS NOT NULL")
+    conn.execute("DROP TABLE readings")
+
+
 def sample_once():
-    """Record one reading. A failed sensor is stored as NULL; nothing is stored if all fail."""
+    """Record every sensor in the catalog. A failed sensor is skipped for this round."""
+    catalog = sensor_catalog()
     if not sensor_lock.acquire(timeout=10):
         log.warning("Sampling skipped: sensors busy")
         return
     measured = int(time.time())
-    values = {}
+    environments, light = [], None
     try:
-        for read in (read_environment, read_light):
+        for sensor in catalog:
             try:
-                values.update(read())
+                if sensor["type"] == "BME280":
+                    values = read_environment(sensor["address"])
+                    environments.append((measured, sensor["address"], *(values[f] for f in ENVIRONMENT_FIELDS)))
+                else:
+                    light = read_light()["illuminance_lux"]
             except (OSError, RuntimeError) as error:  # I2C errors and ID mismatches
-                log.warning("Sampling %s failed: %s", read.__name__, error)
+                log.warning("Sampling %s at %s failed: %s", sensor["type"], sensor["address"], error)
     finally:
         sensor_lock.release()
-    if not any(values.get(f) is not None for f in READING_FIELDS):
-        return
     retention = float(os.environ.get("RPZ_RETENTION_DAYS", "90"))
     with connection() as conn:
-        conn.execute("INSERT OR REPLACE INTO readings VALUES (?, ?, ?, ?, ?)",
-                     (measured, *(values.get(f) for f in READING_FIELDS)))
-        conn.execute("DELETE FROM readings WHERE ts < ?", (measured - int(retention * 86400),))
+        conn.executemany("INSERT OR REPLACE INTO environment_readings VALUES (?, ?, ?, ?, ?)", environments)
+        if light is not None:
+            conn.execute("INSERT OR REPLACE INTO light_readings VALUES (?, ?)", (measured, light))
+        for table in ("environment_readings", "light_readings"):
+            conn.execute(f"DELETE FROM {table} WHERE ts < ?", (measured - int(retention * 86400),))
 
 
 def sampler(stop: threading.Event, interval: float):
@@ -82,6 +135,9 @@ def sampler(stop: threading.Event, interval: float):
 
 @asynccontextmanager
 async def lifespan(app):
+    sensor_catalog()  # fail at startup on a bad RPZ_SENSOR_LABELS
+    with connection() as conn:
+        migrate_readings(conn)
     interval = float(os.environ.get("RPZ_SAMPLE_SECONDS", "60"))
     stop = threading.Event()
     thread = threading.Thread(target=sampler, args=(stop, interval), name="sampler", daemon=True)
@@ -93,7 +149,7 @@ async def lifespan(app):
         thread.join(timeout=15)
 
 
-app = FastAPI(title="RPZ-IR-Sensor API", version="1.1.0", lifespan=lifespan,
+app = FastAPI(title="RPZ-IR-Sensor API", version="1.2.0", lifespan=lifespan,
               description="Temperature (°C), humidity (%), pressure (hPa), illuminance (lux), and 38 kHz infrared.")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -133,8 +189,9 @@ def connection():
     try:
         with conn:
             conn.execute("CREATE TABLE IF NOT EXISTS codes (name TEXT PRIMARY KEY, pulses TEXT NOT NULL, updated_at TEXT NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS readings (ts INTEGER PRIMARY KEY, temperature_c REAL, "
-                         "humidity_percent REAL, pressure_hpa REAL, illuminance_lux REAL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS environment_readings (ts INTEGER NOT NULL, address TEXT NOT NULL, "
+                         "temperature_c REAL, humidity_percent REAL, pressure_hpa REAL, PRIMARY KEY (ts, address))")
+            conn.execute("CREATE TABLE IF NOT EXISTS light_readings (ts INTEGER PRIMARY KEY, illuminance_lux REAL)")
             yield conn
     finally:
         conn.close()
@@ -252,37 +309,57 @@ def health():
 @app.get("/sensors", dependencies=[Depends(authorize_read)])
 def sensors():
     with hardware(sensor_lock):
-        return {"measured_at": timestamp(), **read_environment(), **read_light()}
+        result = {"measured_at": timestamp(), **read_environment(), **read_light()}
+    return {**result, "labels": {"environment": label_of(result["address"]), "light": label_of(LIGHT_ADDRESS)}}
+
+
+@app.get("/sensors/labels", dependencies=[Depends(authorize_read)])
+def labels():
+    """Recorded sensors with their I2C address, label and metrics (set by RPZ_SENSOR_LABELS)."""
+    return {"sensors": sensor_catalog()}
 
 
 @app.get("/sensors/environment", dependencies=[Depends(authorize_read)])
 def environment(address: Literal["0x76", "0x77"] | None = None):
     with hardware(sensor_lock):
-        return {"measured_at": timestamp(), **read_environment(address)}
+        result = {"measured_at": timestamp(), **read_environment(address)}
+    return {**result, "label": label_of(result["address"])}
 
 
 @app.get("/sensors/light", dependencies=[Depends(authorize_read)])
 def light():
     with hardware(sensor_lock):
-        return {"measured_at": timestamp(), **read_light()}
+        result = {"measured_at": timestamp(), **read_light()}
+    return {**result, "address": LIGHT_ADDRESS, "label": label_of(LIGHT_ADDRESS)}
 
 
-def reading(row):
+def reading(row, metrics):
     return {"measured_at": datetime.fromtimestamp(row[0], UTC).isoformat(),
-            **{f: None if v is None else round(v, 2) for f, v in zip(READING_FIELDS, row[1:])}}
+            **{f: None if v is None else round(v, 2) for f, v in zip(metrics, row[1:])}}
 
 
 @app.get("/sensors/history", dependencies=[Depends(authorize_read)])
 def history(hours: float = Query(24, gt=0, le=24 * 366), points: int = Query(360, ge=10, le=2000)):
-    """Recorded readings averaged into at most `points` buckets; `measured_at` is the bucket start."""
+    """Recorded readings per sensor, averaged into at most `points` buckets; `measured_at` is the bucket start."""
     span = int(hours * 3600)
     bucket = max(1, -(-span // points))
+    since = int(time.time()) - span
+    sensors = []
     with connection() as conn:
-        rows = conn.execute("SELECT ts / ? * ? AS t, AVG(temperature_c), AVG(humidity_percent), AVG(pressure_hpa), "
-                            "AVG(illuminance_lux) FROM readings WHERE ts >= ? GROUP BY t ORDER BY t",
-                            (bucket, bucket, int(time.time()) - span)).fetchall()
-        latest = conn.execute("SELECT * FROM readings ORDER BY ts DESC LIMIT 1").fetchone()
-    return {"bucket_seconds": bucket, "latest": latest and reading(latest), "readings": [reading(r) for r in rows]}
+        for sensor in sensor_catalog():
+            metrics = sensor["metrics"]
+            if sensor["type"] == "BME280":
+                table, where, args = "environment_readings", "address = ? AND", (sensor["address"],)
+            else:
+                table, where, args = "light_readings", "", ()
+            averages = ", ".join(f"AVG({m})" for m in metrics)
+            rows = conn.execute(f"SELECT ts / ? * ? AS t, {averages} FROM {table} WHERE {where} ts >= ? "
+                                "GROUP BY t ORDER BY t", (bucket, bucket, *args, since)).fetchall()
+            latest = conn.execute(f"SELECT ts, {', '.join(metrics)} FROM {table} {'WHERE address = ?' if args else ''} "
+                                  "ORDER BY ts DESC LIMIT 1", args).fetchone()
+            sensors.append({**sensor, "latest": latest and reading(latest, metrics),
+                            "readings": [reading(r, metrics) for r in rows]})
+    return {"bucket_seconds": bucket, "sensors": sensors}
 
 
 @app.get("/", include_in_schema=False)

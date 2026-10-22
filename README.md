@@ -100,12 +100,29 @@ sudo .venv/bin/python install.py
 | `RPZ_READ_API_KEY` | 読み取り専用キーなし | ランダムに生成 |
 | `RPZ_DB` | 作業ディレクトリ内の`data/codes.sqlite3` | `/var/lib/rpz-ir-sensor-api/codes.sqlite3` |
 | `RPZ_BME280_ADDRESS` | `0x77`（基板上） | `0x76`（外付け） |
+| `RPZ_SENSOR_LABELS` | ラベルなし（下記の既定ラベル） | 設定しない |
 | `RPZ_IR_TX` | `/dev/lirc0` | `/dev/rpz-ir-tx` |
 | `RPZ_IR_RX` | `/dev/lirc1` | `/dev/rpz-ir-rx` |
 | `RPZ_SAMPLE_SECONDS` | `60`（`0`で記録停止） | 設定しない |
 | `RPZ_RETENTION_DAYS` | `90` | 設定しない |
 
-基板上の`0x77`はRaspberry Pi本体の発熱の影響を受けます。`/sensors/environment`ではクエリでどちらも指定できます。
+基板上の`0x77`はRaspberry Pi本体の発熱の影響を受けます。`/sensors/environment`ではクエリでどちらも指定できます。`RPZ_BME280_ADDRESS`は、`/sensors`と`/sensors/environment`でアドレスを省略したときに使うBME280です。
+
+### センサーのラベル
+
+`RPZ_SENSOR_LABELS`で、I2Cアドレスごとにラベルを付けます。書式は`アドレス=ラベル`のカンマ区切りで、対象は外付けBME280の`0x76`、基板上BME280の`0x77`、照度センサーTSL2572の`0x39`です。
+
+```ini
+RPZ_SENSOR_LABELS=0x76=屋外,0x77=室内（基板上）,0x39=室内（基板上）
+```
+
+- ラベルを設定したBME280はすべて記録します。どのBME280にもラベルがなければ、`RPZ_BME280_ADDRESS`の1台だけを記録します。照度センサーは常に記録します。
+- ラベルのないセンサーには既定ラベル（`0x76`は「外付け」、`0x77`と`0x39`は「基板上」）が付きます。
+- BME280同士で同じラベルは使えません。照度センサーとBME280には同じラベルを付けられ、ダッシュボードでは1つのまとまりとして表示します。
+- 書式の誤りや未対応のアドレスがあると、サービスは起動しません。`journalctl`で理由を確認してください。
+- ダッシュボードの色はラベルの記載順に割り当てます。
+
+設定したラベルは`GET /sensors/labels`で確認できます。
 
 systemdは設定ファイルを起動時に読み込みます。設定変更後はサービスを再起動してください。サービスが書き込めるのは`/var/lib/rpz-ir-sensor-api`（unitの`StateDirectory`）だけなので、DBはその中に置いてください。待受アドレス・ポートはunitの`ExecStart`で指定します。
 
@@ -116,7 +133,7 @@ systemdは設定ファイルを起動時に読み込みます。設定変更後�
 | キー | 使えるAPI |
 |---|---|
 | `RPZ_API_KEY` | すべて（IR受信・送信、保存コードの変更を含む） |
-| `RPZ_READ_API_KEY` | センサー値の取得（`/sensors`、`/sensors/environment`、`/sensors/light`、`/sensors/history`）のみ |
+| `RPZ_READ_API_KEY` | センサー値とラベルの取得（`/sensors`、`/sensors/environment`、`/sensors/light`、`/sensors/labels`、`/sensors/history`）のみ |
 
 キー未指定・不一致・権限外は401、サーバー側の`RPZ_API_KEY`未設定は503です。Swagger UIでは「Authorize」から設定ファイルのキーを入力します。
 
@@ -150,7 +167,8 @@ rpz -X POST -H "X-API-Key: $RPZ_API_KEY" https://localhost/ir/codes/tv_power/sen
 | GET | `/sensors` | 温度°C、湿度%、気圧hPa、照度lux、UTC日時 |
 | GET | `/sensors/environment` | 温湿度・気圧。`address=0x76`または`0x77`を指定可能 |
 | GET | `/sensors/light` | TSL2572の照度 |
-| GET | `/sensors/history` | 記録済みの測定値。`hours`（既定24、最大8784）の範囲を最大`points`個（既定360、10〜2000）に平均して返します。`latest`は最新の記録です |
+| GET | `/sensors/labels` | 記録対象のセンサー一覧。アドレス、種類、ラベル、測定項目 |
+| GET | `/sensors/history` | センサーごとの記録。`hours`（既定24、最大8784）の範囲を最大`points`個（既定360、10〜2000）に平均した`readings`と、最新の記録`latest`を、`/sensors/labels`と同じ項目に付けて返します |
 | POST | `/ir/receive` | IR受信。`timeout_seconds`は0.1〜30秒、既定10秒。任意の`name`で保存・上書き |
 | POST | `/ir/send` | `{"pulses_us":[...]}`の生コードを38kHzで送信 |
 | GET | `/ir/codes` | 保存コード一覧 |
@@ -167,9 +185,9 @@ IR操作同士とセンサー操作同士はそれぞれ排他制御し、競合
 
 ## ダッシュボード
 
-`https://<host>/dashboard`（`/`からも転送）で、最新値と温度・湿度・気圧・照度の推移を表示します。表示のみで、IR操作はできません。
+`https://<host>/dashboard`（`/`からも転送）で、ラベルごとの最新値と、温度・湿度・気圧・照度の推移を表示します。グラフは項目ごとにラベルを色分けして重ね、上部のチェックボックスでラベルごとに表示・非表示を切り替えられます（ブラウザごとに記憶）。表示のみで、IR操作はできません。
 
-サービスは起動中、`RPZ_SAMPLE_SECONDS`ごとに`/sensors`と同じ値を`RPZ_DB`の`readings`テーブルへ記録し、`RPZ_RETENTION_DAYS`を過ぎた記録を削除します。片方のセンサーだけ失敗した場合は、その値を空として記録します。ダッシュボードは記録を読むだけで、センサーには直接アクセスしません。
+サービスは起動中、`RPZ_SAMPLE_SECONDS`ごとに記録対象の各センサーを読み、`RPZ_DB`の`environment_readings`（BME280、アドレスごと）と`light_readings`（照度）へ記録し、`RPZ_RETENTION_DAYS`を過ぎた記録を削除します。読み取りに失敗したセンサーは、その回の記録を飛ばします。ラベル対応前の`readings`テーブルがあれば、起動時に`RPZ_BME280_ADDRESS`のアドレスの記録として移します。ダッシュボードは記録を読むだけで、センサーには直接アクセスしません。
 
 ページ自体は認証なしで配信しますが、データの取得には読み取り用キー`RPZ_READ_API_KEY`が必要です。入力したキーはそのブラウザのlocalStorageに保存されます。読み取り用キーではIR操作やコードの変更はできません。全権限用の`RPZ_API_KEY`はダッシュボードに入力しないでください。グラフ描画には同梱の[uPlot](https://github.com/leeoniya/uPlot) 1.6.32（MIT、`static/vendor/`）を使い、外部CDNには依存しません。
 
