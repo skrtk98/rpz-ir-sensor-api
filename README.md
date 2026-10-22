@@ -12,6 +12,7 @@ Raspberry Pi Zero 2 W / Debian 13 / Python 3.13.5で動作確認済みです。R
 | 設定 | `/etc/rpz-ir-sensor-api.env`（ops所有、0600） |
 | 保存済みIRコード | `/var/lib/rpz-ir-sensor-api/codes.sqlite3` |
 | API | `http://<host>:8000` |
+| ダッシュボード | `http://<host>:8000/dashboard` |
 | Swagger UI | `http://<host>:8000/docs` |
 | OpenAPI | `http://<host>:8000/openapi.json` |
 
@@ -93,6 +94,8 @@ sudo .venv/bin/python install.py
 | `RPZ_BME280_ADDRESS` | `0x77`（基板上） | `0x76`（外付け） |
 | `RPZ_IR_TX` | `/dev/lirc0` | `/dev/rpz-ir-tx` |
 | `RPZ_IR_RX` | `/dev/lirc1` | `/dev/rpz-ir-rx` |
+| `RPZ_SAMPLE_SECONDS` | `60`（`0`で記録停止） | 設定しない |
+| `RPZ_RETENTION_DAYS` | `90` | 設定しない |
 
 現在の実機では外付けセンサーの`0x76`を設定しています。基板上の`0x77`はRaspberry Pi本体の発熱の影響を受けます。`/sensors/environment`ではクエリでどちらも指定できます。
 
@@ -131,6 +134,7 @@ curl -X POST -H "X-API-Key: $RPZ_API_KEY" http://localhost:8000/ir/codes/tv_powe
 | GET | `/sensors` | 温度°C、湿度%、気圧hPa、照度lux、UTC日時 |
 | GET | `/sensors/environment` | 温湿度・気圧。`address=0x76`または`0x77`を指定可能 |
 | GET | `/sensors/light` | TSL2572の照度 |
+| GET | `/sensors/history` | 記録済みの測定値。`hours`（既定24、最大8784）の範囲を最大`points`個（既定360、10〜2000）に平均して返します。`latest`は最新の記録です |
 | POST | `/ir/receive` | IR受信。`timeout_seconds`は0.1〜30秒、既定10秒。任意の`name`で保存・上書き |
 | POST | `/ir/send` | `{"pulses_us":[...]}`の生コードを38kHzで送信 |
 | GET | `/ir/codes` | 保存コード一覧 |
@@ -141,9 +145,17 @@ curl -X POST -H "X-API-Key: $RPZ_API_KEY" http://localhost:8000/ir/codes/tv_powe
 
 受信結果の`signal`は10個以下の波形なら`short`、それ以上なら`full`です。短い波形も取得・保存できますが、リピート信号や完全なコードと判定しているわけではありません。`full`もプロトコルの正当性や家電の動作を保証しません。
 
-IR操作同士とセンサー操作同士はそれぞれ排他制御し、競合時は409です。IR受信中でもセンサー取得はできます。受信タイムアウトは408、不正な波形は422、ハードウェア異常は503、存在しない保存コードは404です。
+IR操作同士とセンサー操作同士はそれぞれ排他制御し、競合時は409です。定期記録もセンサー操作のため、記録中（毎分1秒未満）の`/sensors`系は409になることがあります。IR受信中でもセンサー取得はできます。受信タイムアウトは408、不正な波形は422、ハードウェア異常は503、存在しない保存コードは404です。
 
 受信待ちには指定時間の上限を設け、連続ノイズで無期限に待ち続けることを防ぎます。設定処理・コード保存・HTTP応答などの時間は別途かかります。`measured_at`は測定処理の開始時に取得するUTC日時です。
+
+## ダッシュボード
+
+`http://<host>:8000/dashboard`（`/`からも転送）で、最新値と温度・湿度・気圧・照度の推移を表示します。表示のみで、IR操作はできません。
+
+サービスは起動中、`RPZ_SAMPLE_SECONDS`ごとに`/sensors`と同じ値を`RPZ_DB`の`readings`テーブルへ記録し、`RPZ_RETENTION_DAYS`を過ぎた記録を削除します。片方のセンサーだけ失敗した場合は、その値を空として記録します。ダッシュボードは記録を読むだけで、センサーには直接アクセスしません。
+
+ページ自体は認証なしで配信しますが、データの取得にはAPIキーが必要です。初回に入力したキーはそのブラウザのlocalStorageに保存されます。このキーでIR送信も可能になるため、共有端末では使わないでください。グラフ描画には同梱の[uPlot](https://github.com/leeoniya/uPlot) 1.6.32（MIT、`static/vendor/`）を使い、外部CDNには依存しません。
 
 ## 開発・運用
 

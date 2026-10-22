@@ -9,13 +9,15 @@ import sqlite3
 import struct
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 log = logging.getLogger(__name__)
@@ -23,6 +25,8 @@ api_key = APIKeyHeader(name="X-API-Key", auto_error=False)
 sensor_lock = threading.Lock()
 ir_lock = threading.Lock()
 MAX_PULSES = 1023
+READING_FIELDS = ("temperature_c", "humidity_percent", "pressure_hpa", "illuminance_lux")
+STATIC = Path(__file__).parent / "static"
 
 
 def authorize(key: str | None = Depends(api_key)) -> None:
@@ -33,8 +37,55 @@ def authorize(key: str | None = Depends(api_key)) -> None:
         raise HTTPException(401, "Invalid API key")
 
 
-app = FastAPI(title="RPZ-IR-Sensor API", version="1.0.0",
+def sample_once():
+    """Record one reading. A failed sensor is stored as NULL; nothing is stored if all fail."""
+    if not sensor_lock.acquire(timeout=10):
+        log.warning("Sampling skipped: sensors busy")
+        return
+    measured = int(time.time())
+    values = {}
+    try:
+        for read in (read_environment, read_light):
+            try:
+                values.update(read())
+            except (OSError, RuntimeError) as error:  # I2C errors and ID mismatches
+                log.warning("Sampling %s failed: %s", read.__name__, error)
+    finally:
+        sensor_lock.release()
+    if not any(values.get(f) is not None for f in READING_FIELDS):
+        return
+    retention = float(os.environ.get("RPZ_RETENTION_DAYS", "90"))
+    with connection() as conn:
+        conn.execute("INSERT OR REPLACE INTO readings VALUES (?, ?, ?, ?, ?)",
+                     (measured, *(values.get(f) for f in READING_FIELDS)))
+        conn.execute("DELETE FROM readings WHERE ts < ?", (measured - int(retention * 86400),))
+
+
+def sampler(stop: threading.Event, interval: float):
+    while not stop.is_set():
+        try:
+            sample_once()
+        except Exception:
+            log.exception("Sampling failed")
+        stop.wait(interval)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    interval = float(os.environ.get("RPZ_SAMPLE_SECONDS", "60"))
+    stop = threading.Event()
+    thread = threading.Thread(target=sampler, args=(stop, interval), name="sampler", daemon=True)
+    if interval > 0:
+        thread.start()
+    yield
+    stop.set()
+    if thread.is_alive():
+        thread.join(timeout=15)
+
+
+app = FastAPI(title="RPZ-IR-Sensor API", version="1.1.0", lifespan=lifespan,
               description="Temperature (°C), humidity (%), pressure (hPa), illuminance (lux), and 38 kHz infrared.")
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 class Code(BaseModel):
@@ -72,6 +123,8 @@ def connection():
     try:
         with conn:
             conn.execute("CREATE TABLE IF NOT EXISTS codes (name TEXT PRIMARY KEY, pulses TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS readings (ts INTEGER PRIMARY KEY, temperature_c REAL, "
+                         "humidity_percent REAL, pressure_hpa REAL, illuminance_lux REAL)")
             yield conn
     finally:
         conn.close()
@@ -202,6 +255,34 @@ def environment(address: Literal["0x76", "0x77"] | None = None):
 def light():
     with hardware(sensor_lock):
         return {"measured_at": timestamp(), **read_light()}
+
+
+def reading(row):
+    return {"measured_at": datetime.fromtimestamp(row[0], UTC).isoformat(),
+            **{f: None if v is None else round(v, 2) for f, v in zip(READING_FIELDS, row[1:])}}
+
+
+@app.get("/sensors/history", dependencies=[Depends(authorize)])
+def history(hours: float = Query(24, gt=0, le=24 * 366), points: int = Query(360, ge=10, le=2000)):
+    """Recorded readings averaged into at most `points` buckets; `measured_at` is the bucket start."""
+    span = int(hours * 3600)
+    bucket = max(1, -(-span // points))
+    with connection() as conn:
+        rows = conn.execute("SELECT ts / ? * ? AS t, AVG(temperature_c), AVG(humidity_percent), AVG(pressure_hpa), "
+                            "AVG(illuminance_lux) FROM readings WHERE ts >= ? GROUP BY t ORDER BY t",
+                            (bucket, bucket, int(time.time()) - span)).fetchall()
+        latest = conn.execute("SELECT * FROM readings ORDER BY ts DESC LIMIT 1").fetchone()
+    return {"bucket_seconds": bucket, "latest": latest and reading(latest), "readings": [reading(r) for r in rows]}
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse("/dashboard")
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard():
+    return FileResponse(STATIC / "dashboard.html")
 
 
 @app.post("/ir/receive", dependencies=[Depends(authorize)])

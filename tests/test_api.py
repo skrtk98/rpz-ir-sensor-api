@@ -8,6 +8,7 @@ import app as api
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("RPZ_API_KEY", "test-key")
     monkeypatch.setenv("RPZ_DB", str(tmp_path / "codes.sqlite3"))
+    monkeypatch.setenv("RPZ_SAMPLE_SECONDS", "0")
     with TestClient(api.app, headers={"X-API-Key": "test-key"}) as client:
         yield client
 
@@ -102,3 +103,67 @@ def test_absolute_receive_deadline(monkeypatch):
     with pytest.raises(api.HTTPException) as error:
         api.record_ir(1)
     assert error.value.status_code == 408
+
+
+def test_sampling_records_history(client, monkeypatch):
+    monkeypatch.setattr(api, "read_environment", lambda: {"temperature_c": 24.123, "humidity_percent": 50,
+                                                          "pressure_hpa": 1013, "address": "0x76"})
+    monkeypatch.setattr(api, "read_light", lambda: {"illuminance_lux": 100, "sensor": "TSL2572"})
+    api.sample_once()
+    result = client.get("/sensors/history", params={"hours": 1}).json()
+    assert result["latest"]["temperature_c"] == 24.12
+    assert result["readings"][0]["illuminance_lux"] == 100
+    assert client.get("/sensors/history", headers={"X-API-Key": "wrong"}).status_code == 401
+
+
+def test_failed_sensor_is_stored_as_null(client, monkeypatch):
+    def broken():
+        raise OSError("device missing")
+
+    monkeypatch.setattr(api, "read_environment", broken)
+    monkeypatch.setattr(api, "read_light", lambda: {"illuminance_lux": 5})
+    api.sample_once()
+    latest = client.get("/sensors/history").json()["latest"]
+    assert latest["temperature_c"] is None and latest["illuminance_lux"] == 5
+    monkeypatch.setattr(api, "read_light", broken)
+    monkeypatch.setattr(api.time, "time", lambda: 2_000_000_000)
+    api.sample_once()
+    assert client.get("/sensors/history").json()["latest"]["illuminance_lux"] == 5
+    assert not api.sensor_lock.locked()
+
+
+def test_history_buckets_and_retention(client, monkeypatch):
+    now = 1_800_000_000
+    monkeypatch.setattr(api.time, "time", lambda: now)
+    monkeypatch.setenv("RPZ_RETENTION_DAYS", "1")
+    with api.connection() as conn:
+        conn.executemany("INSERT INTO readings VALUES (?, ?, NULL, NULL, NULL)",
+                         [(now - 3 * 86400, 0)] + [(now - 3600 + i * 60, i) for i in range(60)])
+    result = client.get("/sensors/history", params={"hours": 1, "points": 10}).json()
+    assert result["bucket_seconds"] == 360
+    assert len(result["readings"]) <= 11
+    assert sum(r["temperature_c"] for r in result["readings"]) > 0
+    monkeypatch.setattr(api, "read_environment", lambda: {"temperature_c": 20})
+    monkeypatch.setattr(api, "read_light", dict)
+    api.sample_once()
+    with api.connection() as conn:
+        assert conn.execute("SELECT MIN(ts) FROM readings").fetchone()[0] > now - 86400
+
+
+def test_sampling_waits_out_busy_sensors(monkeypatch):
+    class BusyLock:
+        def acquire(self, timeout):
+            return False
+
+    monkeypatch.setattr(api, "sensor_lock", BusyLock())
+    called = []
+    monkeypatch.setattr(api, "read_light", lambda: called.append(1))
+    api.sample_once()
+    assert not called
+
+
+def test_dashboard_is_public_and_static(client):
+    page = client.get("/dashboard", headers={})
+    assert page.status_code == 200 and "uPlot" in page.text
+    assert client.get("/static/vendor/uPlot.iife.min.js").status_code == 200
+    assert client.get("/", follow_redirects=False).headers["location"] == "/dashboard"

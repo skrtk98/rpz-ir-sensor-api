@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RPZ-IR-Sensor ダッシュボード</title>
+<link rel="stylesheet" href="/static/vendor/uPlot.min.css">
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --border: #e3e2de;
+  --grid: #e9e8e4;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #77766f;
+  --series-1: #2a78d6;
+  --accent: #2a78d6;
+  --critical: #c62f2f;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #121211;
+    --surface-1: #1a1a19;
+    --border: #2e2e2c;
+    --grid: #2a2a28;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #9a998f;
+    --series-1: #3987e5;
+    --accent: #3987e5;
+    --critical: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #121211;
+  --surface-1: #1a1a19;
+  --border: #2e2e2c;
+  --grid: #2a2a28;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #9a998f;
+  --series-1: #3987e5;
+  --accent: #3987e5;
+  --critical: #e66767;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font: 14px/1.5 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+}
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 16px; }
+h1 { font-size: 18px; margin: 0; flex: 1 1 auto; }
+.status { color: var(--text-secondary); font-size: 13px; }
+.status.error { color: var(--critical); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+.range { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.range button { border: 0; border-right: 1px solid var(--border); background: var(--surface-1); }
+.range button:last-child { border-right: 0; }
+.range button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+button {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 8px; padding: 4px 12px; cursor: pointer;
+}
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; min-width: 0; }
+.tile .label { color: var(--text-secondary); font-size: 13px; }
+.tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .unit { font-size: 15px; font-weight: 400; color: var(--text-secondary); margin-left: 4px; }
+.charts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.chart h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+.chart .plot { min-height: 220px; }
+.uplot { font-family: inherit; }
+.u-legend { color: var(--text-secondary); font-size: 12px; text-align: left; }
+.u-legend .u-marker { border-radius: 2px; }
+details { margin-top: 16px; }
+summary { cursor: pointer; color: var(--text-secondary); }
+.table-wrap { max-height: 360px; overflow: auto; margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+th, td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { position: sticky; top: 0; background: var(--surface-1); color: var(--text-secondary); font-weight: 600; }
+dialog { background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 12px; max-width: 420px; width: calc(100% - 32px); }
+dialog input { width: 100%; font: inherit; padding: 6px 8px; margin: 8px 0 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-0); color: var(--text-primary); }
+.note { color: var(--text-muted); font-size: 12px; margin-top: 16px; }
+@media (max-width: 760px) {
+  .tiles { grid-template-columns: repeat(2, 1fr); }
+  .charts { grid-template-columns: 1fr; }
+  .tile .value { font-size: 24px; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>RPZ-IR-Sensor</h1>
+    <span id="status" class="status" role="status">読み込み中…</span>
+  </header>
+  <div class="controls">
+    <div class="range" role="group" aria-label="表示期間">
+      <button type="button" data-hours="6">6時間</button>
+      <button type="button" data-hours="24">24時間</button>
+      <button type="button" data-hours="168">7日</button>
+      <button type="button" data-hours="720">30日</button>
+      <button type="button" data-hours="2160">90日</button>
+    </div>
+    <button type="button" id="change-key">APIキー</button>
+  </div>
+  <section class="tiles" id="tiles" aria-label="最新の測定値"></section>
+  <section class="charts" id="charts" aria-label="推移"></section>
+  <details id="table-view">
+    <summary>表で見る</summary>
+    <div class="table-wrap"><table id="table"></table></div>
+  </details>
+  <p class="note">1分ごとの記録を表示期間に応じて平均しています。時刻はブラウザのタイムゾーンで表示します。</p>
+</main>
+
+<dialog id="key-dialog">
+  <form method="dialog" id="key-form">
+    <label for="key-input">APIキー（<code>/etc/rpz-ir-sensor-api.env</code> の <code>RPZ_API_KEY</code>）</label>
+    <input id="key-input" type="password" autocomplete="current-password" required>
+    <button type="submit">保存</button>
+  </form>
+</dialog>
+
+<script src="/static/vendor/uPlot.iife.min.js"></script>
+<script>
+"use strict";
+const FIELDS = [
+  { key: "temperature_c", label: "温度", unit: "°C", digits: 1 },
+  { key: "humidity_percent", label: "湿度", unit: "%", digits: 1 },
+  { key: "pressure_hpa", label: "気圧", unit: "hPa", digits: 1 },
+  { key: "illuminance_lux", label: "照度", unit: "lx", digits: 0 },
+];
+const KEY_STORE = "rpz-api-key", RANGE_STORE = "rpz-range-hours";
+const REFRESH_MS = 60_000;
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* per-viewer convenience only */ } },
+};
+
+let apiKey = store.get(KEY_STORE) || "";
+let hours = Number(store.get(RANGE_STORE)) || 24;
+let last = null;
+let plots = [];
+
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d) => (v == null ? "--" : v.toFixed(d));
+const timeFmt = new Intl.DateTimeFormat("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+function setStatus(text, error = false) {
+  $("status").textContent = text;
+  $("status").classList.toggle("error", error);
+}
+
+function askKey() {
+  $("key-input").value = apiKey;
+  $("key-dialog").showModal();
+}
+
+$("key-form").addEventListener("submit", () => {
+  apiKey = $("key-input").value.trim();
+  store.set(KEY_STORE, apiKey);
+  load();
+});
+$("change-key").addEventListener("click", askKey);
+
+document.querySelectorAll(".range button").forEach((b) => {
+  b.addEventListener("click", () => {
+    hours = Number(b.dataset.hours);
+    store.set(RANGE_STORE, String(hours));
+    load();
+  });
+});
+
+function markRange() {
+  document.querySelectorAll(".range button").forEach((b) => {
+    b.setAttribute("aria-pressed", String(Number(b.dataset.hours) === hours));
+  });
+}
+
+async function load() {
+  markRange();
+  if (!apiKey) { setStatus("APIキーを入力してください"); askKey(); return; }
+  let res;
+  try {
+    res = await fetch(`/sensors/history?hours=${hours}&points=360`, { headers: { "X-API-Key": apiKey } });
+  } catch {
+    setStatus("接続できません。再試行します", true);
+    return;
+  }
+  if (res.status === 401) { setStatus("APIキーが正しくありません", true); askKey(); return; }
+  if (!res.ok) { setStatus(`取得に失敗しました（HTTP ${res.status}）`, true); return; }
+  last = await res.json();
+  render();
+}
+
+function columns(data) {
+  // Break the line where samples are missing instead of drawing across the gap.
+  const xs = [], ys = FIELDS.map(() => []);
+  let prev = null;
+  for (const r of data.readings) {
+    const t = Date.parse(r.measured_at) / 1000;
+    if (prev != null && t - prev > data.bucket_seconds * 2.5) {
+      xs.push(prev + data.bucket_seconds);
+      ys.forEach((y) => y.push(null));
+    }
+    xs.push(t);
+    FIELDS.forEach((f, i) => ys[i].push(r[f.key]));
+    prev = t;
+  }
+  return [xs, ys];
+}
+
+function renderTiles(latest) {
+  $("tiles").replaceChildren(...FIELDS.map((f) => {
+    const el = document.createElement("div");
+    el.className = "card tile";
+    const v = latest ? latest[f.key] : null;
+    el.innerHTML = `<div class="label"></div><div class="value"></div>`;
+    el.querySelector(".label").textContent = f.label;
+    el.querySelector(".value").textContent = fmt(v, f.digits);
+    const u = document.createElement("span");
+    u.className = "unit";
+    u.textContent = f.unit;
+    el.querySelector(".value").append(u);
+    return el;
+  }));
+}
+
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function tick(incr) {
+  // 24-hour clock; show the date at midnight or when ticks are a day or more apart.
+  return (v) => {
+    const d = new Date(v * 1000);
+    if (incr >= 86400 || (d.getHours() === 0 && d.getMinutes() === 0)) return `${d.getMonth() + 1}/${d.getDate()}`;
+    return `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+}
+
+function plotOptions(f, width) {
+  const color = css("--series-1"), axis = css("--text-secondary"), grid = css("--grid");
+  const axisStyle = { stroke: axis, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid, width: 1 } };
+  return {
+    width, height: 220,
+    cursor: { sync: { key: "rpz" }, points: { size: 8 }, drag: { x: false, y: false } },
+    scales: { x: { time: true } },
+    axes: [
+      { ...axisStyle, values: (u, splits, ax, space, incr) => splits.map(tick(incr)) },
+      { ...axisStyle, size: 64, values: (u, vals) => vals.map((v) => v.toFixed(f.digits)) },
+    ],
+    series: [
+      { label: "時刻", value: (u, v) => (v == null ? "--" : timeFmt.format(new Date(v * 1000))) },
+      {
+        label: `${f.label} (${f.unit})`, stroke: color, width: 2, fill: color + "1a",
+        points: { show: false }, spanGaps: false,
+        value: (u, v) => (v == null ? "--" : `${v.toFixed(f.digits)} ${f.unit}`),
+      },
+    ],
+  };
+}
+
+function renderCharts(xs, ys) {
+  plots.forEach((p) => p.destroy());
+  plots = [];
+  const container = $("charts");
+  container.replaceChildren();
+  FIELDS.forEach((f, i) => {
+    const card = document.createElement("div");
+    card.className = "card chart";
+    const h = document.createElement("h2");
+    h.textContent = `${f.label}（${f.unit}）`;
+    const plot = document.createElement("div");
+    plot.className = "plot";
+    card.append(h, plot);
+    container.append(card);
+    plots.push(new uPlot(plotOptions(f, plot.clientWidth), [xs, ys[i]], plot));
+  });
+}
+
+function renderTable(data) {
+  const head = `<thead><tr><th>時刻</th>${FIELDS.map((f) => `<th>${f.label} (${f.unit})</th>`).join("")}</tr></thead>`;
+  const rows = data.readings.slice().reverse().map((r) =>
+    `<tr><td>${timeFmt.format(new Date(r.measured_at))}</td>${FIELDS.map((f) => `<td>${fmt(r[f.key], f.digits)}</td>`).join("")}</tr>`);
+  $("table").innerHTML = head + `<tbody>${rows.join("")}</tbody>`;
+}
+
+function render() {
+  if (!last) return;
+  const [xs, ys] = columns(last);
+  renderTiles(last.latest);
+  renderCharts(xs, ys);
+  if ($("table-view").open) renderTable(last);
+  if (!last.latest) {
+    setStatus("まだ記録がありません");
+  } else {
+    const at = new Date(last.latest.measured_at);
+    const minutes = Math.round((Date.now() - at) / 60000);
+    setStatus(`最終記録 ${timeFmt.format(at)}（${minutes <= 0 ? "1分以内" : minutes + "分前"}）`, minutes > 5);
+  }
+}
+
+$("table-view").addEventListener("toggle", () => { if ($("table-view").open && last) renderTable(last); });
+new ResizeObserver(() => {
+  plots.forEach((p) => p.setSize({ width: p.root.parentElement.clientWidth, height: 220 }));
+}).observe($("charts"));
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+
+load();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
