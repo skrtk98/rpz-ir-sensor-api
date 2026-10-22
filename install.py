@@ -5,9 +5,8 @@ import pwd
 import secrets
 import socket
 import subprocess
+import sys
 from pathlib import Path
-
-import cgir
 
 SERVICE_USER = 'rpz-ir-sensor'
 IR_GROUP = 'rpz-ir'
@@ -26,6 +25,9 @@ if os.geteuid() != 0 or not os.environ.get('SUDO_USER'):
 if Path(__file__).resolve().parent != repo:
     raise RuntimeError(f'The checkout must be at {repo}')
 deploy = pwd.getpwnam(os.environ['SUDO_USER'])
+# Root-owned __pycache__ in the deploy user's virtualenv would break later `uv sync` runs.
+sys.dont_write_bytecode = True
+import cgir
 
 roles = {}
 for path in sorted(Path('/dev').glob('lirc*')):
