@@ -39,10 +39,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 sudo install -d -o "$USER" -g "$USER" -m 755 /opt/rpz-ir-sensor-api
 git clone https://github.com/skrtk98/rpz-ir-sensor-api.git /opt/rpz-ir-sensor-api
 cd /opt/rpz-ir-sensor-api
-UV_PYTHON_PREFERENCE=only-system ~/.local/bin/uv sync --locked --no-dev
+UV_PYTHON_PREFERENCE=only-system ~/.local/bin/uv sync --locked --no-dev --compile-bytecode
 ```
 
-uvの導入方法は[公式ドキュメント](https://docs.astral.sh/uv/getting-started/installation/)を参照してください。仮想環境はサービス用ユーザーから読める必要があるため、ホームディレクトリ内にインストールされるuv管理のPythonではなく、OS標準のPythonを使います。
+uvの導入方法は[公式ドキュメント](https://docs.astral.sh/uv/getting-started/installation/)を参照してください。仮想環境はサービス用ユーザーから読める必要があるため、ホームディレクトリ内にインストールされるuv管理のPythonではなく、OS標準のPythonを使います。サービス用ユーザーは`/opt`に書き込めないため、`--compile-bytecode`でバイトコードを事前に生成します。
 
 ### 2. ハードウェア設定
 
@@ -194,7 +194,7 @@ cd /opt/rpz-ir-sensor-api
 ~/.local/bin/uv sync --locked
 ~/.local/bin/uv run --locked pytest -q
 ~/.local/bin/uv run --locked ruff check app.py tests
-~/.local/bin/uv sync --locked --no-dev
+~/.local/bin/uv sync --locked --no-dev --compile-bytecode
 ```
 
 ### ソース更新
@@ -204,7 +204,7 @@ cd /opt/rpz-ir-sensor-api
 ```bash
 cd /opt/rpz-ir-sensor-api
 git pull --ff-only
-~/.local/bin/uv sync --locked --no-dev
+~/.local/bin/uv sync --locked --no-dev --compile-bytecode
 sudo systemctl restart rpz-ir-sensor-api
 ```
 
