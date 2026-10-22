@@ -92,10 +92,12 @@ cert.chmod(0o644)
 state.mkdir(mode=0o700, exist_ok=True)
 run('chown', '-R', f'{SERVICE_USER}:{SERVICE_USER}', str(state))
 
-run('install', '-m', '644', str(repo / 'rpz-ir-sensor-api.service'), '/etc/systemd/system/rpz-ir-sensor-api.service')
+units = ('rpz-ir-sensor-api', 'rpz-ir-sensor-redirect')
+for unit in units:
+    run('install', '-m', '644', str(repo / f'{unit}.service'), f'/etc/systemd/system/{unit}.service')
 run('systemctl', 'daemon-reload')
-run('systemctl', 'enable', 'rpz-ir-sensor-api')
-run('systemctl', 'restart', 'rpz-ir-sensor-api')
+run('systemctl', 'enable', *units)
+run('systemctl', 'restart', *units)
 fingerprint = subprocess.run(['openssl', 'x509', '-in', str(cert), '-noout', '-fingerprint', '-sha256'],
                              capture_output=True, text=True, check=True).stdout.strip()
 print('TLS certificate', fingerprint)

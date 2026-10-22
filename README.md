@@ -13,12 +13,12 @@ Raspberry Pi Zero 2 W / Debian 13 / Python 3.13.5で動作確認済みです。R
 | 設定 | `/etc/rpz-ir-sensor-api.env`（root所有、デプロイ用ユーザーのグループで読み取り可、0640） |
 | TLS証明書 | `/etc/rpz-ir-sensor-api/tls.crt`、`tls.key` |
 | 記録・保存済みIRコード | `/var/lib/rpz-ir-sensor-api/codes.sqlite3` |
-| API | `https://<host>:8000` |
-| ダッシュボード | `https://<host>:8000/dashboard` |
-| Swagger UI | `https://<host>:8000/docs` |
-| OpenAPI | `https://<host>:8000/openapi.json` |
+| API | `https://<host>` |
+| ダッシュボード | `https://<host>/dashboard` |
+| Swagger UI | `https://<host>/docs` |
+| OpenAPI | `https://<host>/openapi.json` |
 
-`<host>`は実機のホスト名（avahiが動いていれば`<ホスト名>.local`）かIPアドレスです。全IPv4インターフェースの8000番ポートでHTTPSのみを待ち受けます。LAN内向けのサービスです。
+`<host>`は実機のホスト名（avahiが動いていれば`<ホスト名>.local`）かIPアドレスです。全IPv4インターフェースの443番ポートでHTTPSを待ち受けます。80番ポートのHTTPは、別サービス`rpz-ir-sensor-redirect`（`redirect.py`、標準ライブラリのみ）が同じパスのHTTPSへ308で転送するだけで、APIは提供しません。HTTPで送ったAPIキーは平文で流れるので、クライアントには最初から`https://`を指定してください。LAN内向けのサービスです。
 
 証明書はインストーラーが生成する自己署名証明書です。初回接続時にブラウザが警告を出すので、インストーラーが表示したSHA-256フィンガープリントと一致することを確認してから進むか、`tls.crt`を端末に信頼済みとして登録してください。証明書にはホスト名、`<ホスト名>.local`、`localhost`、生成時のIPアドレスが入ります。IPアドレスが変わった場合は、`tls.key`と`tls.crt`を削除してインストーラーを再実行すると作り直せます。
 
@@ -82,7 +82,7 @@ sudo .venv/bin/python install.py
 - udevルールを配置し、`/dev/rpz-ir-tx`と`/dev/rpz-ir-rx`を作成する。udevはドライバー名で送受信を判定し、デバイスを`rpz-ir`グループだけが読み書きできるようにする。
 - 設定ファイルがなければ作成し、全権限用と読み取り用のAPIキーを生成する。既存の設定ファイルがあれば内容は保持し、読み取り用キーがなければ追加し、`RPZ_IR_TX`と`RPZ_IR_RX`は上記の固定デバイス名に書き直す。
 - TLS証明書がなければ生成する。
-- systemd unitを配置し、サービスを有効化・再起動する。
+- systemd unit（APIと転送用）を配置し、両サービスを有効化・再起動する。
 
 新規作成時の設定では、外付けBME280の`0x76`を使います。外付けBME280がない場合は、次の「設定」を参照して`RPZ_BME280_ADDRESS=0x77`に変更してください。
 
@@ -125,21 +125,21 @@ systemdは設定ファイルを起動時に読み込みます。設定変更後�
 ```bash
 . /etc/rpz-ir-sensor-api.env
 alias rpz='curl --cacert /etc/rpz-ir-sensor-api/tls.crt'
-rpz -H "X-API-Key: $RPZ_READ_API_KEY" https://localhost:8000/sensors
-rpz -H "X-API-Key: $RPZ_READ_API_KEY" 'https://localhost:8000/sensors/environment?address=0x77'
+rpz -H "X-API-Key: $RPZ_READ_API_KEY" https://localhost/sensors
+rpz -H "X-API-Key: $RPZ_READ_API_KEY" 'https://localhost/sensors/environment?address=0x77'
 ```
 
 IRの受信・保存は、次のコマンドの実行中にリモコンを受信機に向けて押してください。`name`を省略すると保存せずに波形を返します。**既存の名前を指定すると保存済みコードを上書きします。**
 
 ```bash
 rpz -H "X-API-Key: $RPZ_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"timeout_seconds":10,"name":"tv_power"}' https://localhost:8000/ir/receive
+  -d '{"timeout_seconds":10,"name":"tv_power"}' https://localhost/ir/receive
 ```
 
 保存したコードの送信は家電を操作するため、送信先を確認して実行してください。
 
 ```bash
-rpz -X POST -H "X-API-Key: $RPZ_API_KEY" https://localhost:8000/ir/codes/tv_power/send
+rpz -X POST -H "X-API-Key: $RPZ_API_KEY" https://localhost/ir/codes/tv_power/send
 ```
 
 ### エンドポイント
@@ -167,7 +167,7 @@ IR操作同士とセンサー操作同士はそれぞれ排他制御し、競合
 
 ## ダッシュボード
 
-`https://<host>:8000/dashboard`（`/`からも転送）で、最新値と温度・湿度・気圧・照度の推移を表示します。表示のみで、IR操作はできません。
+`https://<host>/dashboard`（`/`からも転送）で、最新値と温度・湿度・気圧・照度の推移を表示します。表示のみで、IR操作はできません。
 
 サービスは起動中、`RPZ_SAMPLE_SECONDS`ごとに`/sensors`と同じ値を`RPZ_DB`の`readings`テーブルへ記録し、`RPZ_RETENTION_DAYS`を過ぎた記録を削除します。片方のセンサーだけ失敗した場合は、その値を空として記録します。ダッシュボードは記録を読むだけで、センサーには直接アクセスしません。
 
@@ -180,9 +180,9 @@ IR操作同士とセンサー操作同士はそれぞれ排他制御し、競合
 ### 状態・ログの確認
 
 ```bash
-systemctl status rpz-ir-sensor-api --no-pager
+systemctl status rpz-ir-sensor-api rpz-ir-sensor-redirect --no-pager
 journalctl -u rpz-ir-sensor-api -n 100 --no-pager
-curl --cacert /etc/rpz-ir-sensor-api/tls.crt https://localhost:8000/health
+curl --cacert /etc/rpz-ir-sensor-api/tls.crt https://localhost/health
 ```
 
 ### 開発用依存とチェック
@@ -225,7 +225,7 @@ cd /opt/rpz-ir-sensor-api
 sudo .venv/bin/python install.py
 ```
 
-サービスは専用ユーザー`rpz-ir-sensor`と`i2c`・`rpz-ir`グループで動作し、`/home`を参照できず、I2CとLIRC以外のデバイスにはアクセスできません。ハードウェアの競合防止のため、uvicornは必ず1 workerで実行します。APIキー、TLS鍵、SQLiteデータはGit対象外で、`uv.lock`はGit管理対象です。
+サービスは専用ユーザー`rpz-ir-sensor`と`i2c`・`rpz-ir`グループで動作します。443番・80番で待ち受けるための`CAP_NET_BIND_SERVICE`以外の特権は持たず、`/home`を参照できず、I2CとLIRC以外のデバイスにはアクセスできません。ハードウェアの競合防止のため、uvicornは必ず1 workerで実行します。APIキー、TLS鍵、SQLiteデータはGit対象外で、`uv.lock`はGit管理対象です。
 
 ## 参考
 
