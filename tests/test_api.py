@@ -7,6 +7,7 @@ import app as api
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("RPZ_API_KEY", "test-key")
+    monkeypatch.setenv("RPZ_READ_API_KEY", "read-key")
     monkeypatch.setenv("RPZ_DB", str(tmp_path / "codes.sqlite3"))
     monkeypatch.setenv("RPZ_SAMPLE_SECONDS", "0")
     with TestClient(api.app, headers={"X-API-Key": "test-key"}) as client:
@@ -167,3 +168,15 @@ def test_dashboard_is_public_and_static(client):
     assert page.status_code == 200 and "uPlot" in page.text
     assert client.get("/static/vendor/uPlot.iife.min.js").status_code == 200
     assert client.get("/", follow_redirects=False).headers["location"] == "/dashboard"
+
+
+def test_read_key_cannot_control_ir(client, monkeypatch):
+    monkeypatch.setattr(api, "read_light", lambda: {"illuminance_lux": 1})
+    read = {"X-API-Key": "read-key"}
+    assert client.get("/sensors/light", headers=read).status_code == 200
+    assert client.get("/sensors/history", headers=read).status_code == 200
+    assert client.post("/ir/send", json={"pulses_us": [560]}, headers=read).status_code == 401
+    assert client.get("/ir/codes", headers=read).status_code == 401
+    assert client.get("/sensors/history", headers={"X-API-Key": b"caf\xe9"}).status_code == 401
+    monkeypatch.delenv("RPZ_API_KEY")
+    assert client.get("/sensors/history", headers=read).status_code == 503

@@ -29,12 +29,22 @@ READING_FIELDS = ("temperature_c", "humidity_percent", "pressure_hpa", "illumina
 STATIC = Path(__file__).parent / "static"
 
 
-def authorize(key: str | None = Depends(api_key)) -> None:
-    expected = os.environ.get("RPZ_API_KEY", "")
-    if not expected:
+def check_key(key: str | None, *names: str) -> None:
+    if not os.environ.get("RPZ_API_KEY"):
         raise HTTPException(503, "RPZ_API_KEY is not configured")
-    if key is None or not hmac.compare_digest(key, expected):
+    expected = [os.environ[n].encode() for n in names if os.environ.get(n)]
+    if key is None or not any(hmac.compare_digest(key.encode(), e) for e in expected):
         raise HTTPException(401, "Invalid API key")
+
+
+def authorize(key: str | None = Depends(api_key)) -> None:
+    """Full access, including IR transmission and saved-code changes."""
+    check_key(key, "RPZ_API_KEY")
+
+
+def authorize_read(key: str | None = Depends(api_key)) -> None:
+    """Sensor readings only; RPZ_READ_API_KEY is meant for the dashboard."""
+    check_key(key, "RPZ_API_KEY", "RPZ_READ_API_KEY")
 
 
 def sample_once():
@@ -239,19 +249,19 @@ def health():
                         "ir_rx": Path(os.environ.get("RPZ_IR_RX", "/dev/lirc1")).exists()}}
 
 
-@app.get("/sensors", dependencies=[Depends(authorize)])
+@app.get("/sensors", dependencies=[Depends(authorize_read)])
 def sensors():
     with hardware(sensor_lock):
         return {"measured_at": timestamp(), **read_environment(), **read_light()}
 
 
-@app.get("/sensors/environment", dependencies=[Depends(authorize)])
+@app.get("/sensors/environment", dependencies=[Depends(authorize_read)])
 def environment(address: Literal["0x76", "0x77"] | None = None):
     with hardware(sensor_lock):
         return {"measured_at": timestamp(), **read_environment(address)}
 
 
-@app.get("/sensors/light", dependencies=[Depends(authorize)])
+@app.get("/sensors/light", dependencies=[Depends(authorize_read)])
 def light():
     with hardware(sensor_lock):
         return {"measured_at": timestamp(), **read_light()}
@@ -262,7 +272,7 @@ def reading(row):
             **{f: None if v is None else round(v, 2) for f, v in zip(READING_FIELDS, row[1:])}}
 
 
-@app.get("/sensors/history", dependencies=[Depends(authorize)])
+@app.get("/sensors/history", dependencies=[Depends(authorize_read)])
 def history(hours: float = Query(24, gt=0, le=24 * 366), points: int = Query(360, ge=10, le=2000)):
     """Recorded readings averaged into at most `points` buckets; `measured_at` is the bucket start."""
     span = int(hours * 3600)

@@ -4,22 +4,33 @@ After=network.target
 
 [Service]
 Type=simple
-User=ops
-Group=ops
-SupplementaryGroups=i2c video
-WorkingDirectory=/home/ops/rpz-ir-sensor-api
+User=rpz-ir-sensor
+Group=rpz-ir-sensor
+SupplementaryGroups=i2c rpz-ir
+WorkingDirectory=/opt/rpz-ir-sensor-api
 EnvironmentFile=/etc/rpz-ir-sensor-api.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ops/rpz-ir-sensor-api/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1
+ExecStart=/opt/rpz-ir-sensor-api/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000 --workers 1 --ssl-keyfile /etc/rpz-ir-sensor-api/tls.key --ssl-certfile /etc/rpz-ir-sensor-api/tls.crt
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=35
 UMask=0077
+StateDirectory=rpz-ir-sensor-api
+StateDirectoryMode=0700
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/var/lib/rpz-ir-sensor-api
+ProtectHome=true
+DevicePolicy=closed
+DeviceAllow=char-i2c rw
+DeviceAllow=char-lirc rw
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

@@ -1,2 +1,2 @@
-SUBSYSTEM=="lirc", DRIVERS=="gpio-ir-tx", SYMLINK+="rpz-ir-tx", GROUP="video", MODE="0660"
-SUBSYSTEM=="lirc", DRIVERS=="gpio_ir_recv", SYMLINK+="rpz-ir-rx", GROUP="video", MODE="0660"
+SUBSYSTEM=="lirc", DRIVERS=="gpio-ir-tx", SYMLINK+="rpz-ir-tx", GROUP="rpz-ir", MODE="0660"
+SUBSYSTEM=="lirc", DRIVERS=="gpio_ir_recv", SYMLINK+="rpz-ir-rx", GROUP="rpz-ir", MODE="0660"

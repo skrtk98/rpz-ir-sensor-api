@@ -4,45 +4,45 @@ RPZ-IR-Sensor Rev2の温度・湿度・気圧・照度取得と、38kHzのIR受�
 
 Raspberry Pi Zero 2 W / Debian 13 / Python 3.13.5で動作確認済みです。Rev1の照度センサーTSL2561には未対応です。実際の家電リモコンによる完全なコード取得と、再送による家電操作は未検証です。検証内容は[VERIFICATION.md](VERIFICATION.md)を参照してください。
 
-## 現在の配置
+## 構成
 
 | 項目 | 配置・URL |
 |---|---|
-| ソース | `/home/ops/rpz-ir-sensor-api` |
-| 設定 | `/etc/rpz-ir-sensor-api.env`（ops所有、0600） |
-| 保存済みIRコード | `/var/lib/rpz-ir-sensor-api/codes.sqlite3` |
-| API | `http://<host>:8000` |
-| ダッシュボード | `http://<host>:8000/dashboard` |
-| Swagger UI | `http://<host>:8000/docs` |
-| OpenAPI | `http://<host>:8000/openapi.json` |
+| ソース | `/opt/rpz-ir-sensor-api`（デプロイ用ユーザー所有） |
+| 実行ユーザー | `rpz-ir-sensor`（ログイン不可のシステムユーザー） |
+| 設定 | `/etc/rpz-ir-sensor-api.env`（root所有、デプロイ用ユーザーのグループで読み取り可、0640） |
+| TLS証明書 | `/etc/rpz-ir-sensor-api/tls.crt`、`tls.key` |
+| 記録・保存済みIRコード | `/var/lib/rpz-ir-sensor-api/codes.sqlite3` |
+| API | `https://<host>:8000` |
+| ダッシュボード | `https://<host>:8000/dashboard` |
+| Swagger UI | `https://<host>:8000/docs` |
+| OpenAPI | `https://<host>:8000/openapi.json` |
 
-ホスト名はavahi（mDNS）で解決します。解決できない環境では実機のIPアドレスに置き換えてください。systemdの設定では全IPv4インターフェースの8000番ポートで待ち受けます。LAN内向けのHTTPサービスです。
+`<host>`は実機のホスト名（avahiが動いていれば`<ホスト名>.local`）かIPアドレスです。全IPv4インターフェースの8000番ポートでHTTPSのみを待ち受けます。LAN内向けのサービスです。
+
+証明書はインストーラーが生成する自己署名証明書です。初回接続時にブラウザが警告を出すので、インストーラーが表示したSHA-256フィンガープリントと一致することを確認してから進むか、`tls.crt`を端末に信頼済みとして登録してください。証明書にはホスト名、`<ホスト名>.local`、`localhost`、生成時のIPアドレスが入ります。IPアドレスが変わった場合は、`tls.key`と`tls.crt`を削除してインストーラーを再実行すると作り直せます。
 
 ## 新規導入
-
-既存の実機には導入済みです。以下は新しい環境に導入する場合の手順です。
 
 ### 1. 前提条件と依存の準備
 
 - Raspberry Pi、RPZ-IR-Sensor Rev2、I2C・GPIO IR用ドライバーを提供するOS。
-- Python 3.13以上、systemd、sudoを利用できる`ops`ユーザー。
-- `i2c`と`video`グループが存在すること。
+- Python 3.13以上（OS標準のもの）、systemd、openssl。
+- sudoを利用できるデプロイ用ユーザー。サービスはこのユーザーとは別の専用ユーザーで動きます。
 
-unitと`install.py`はユーザー名`ops`と配置先`/home/ops/rpz-ir-sensor-api`を固定しています。別のユーザーや配置先を使う場合は、両方のファイルを修正してください。
-
-以下は`ops`ユーザーで実行します。uvが導入済みならインストールを省略できます。
+以下はデプロイ用ユーザーで実行します。uvが導入済みならインストールを省略できます。
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git curl python3
-sudo usermod -aG i2c,video ops
+sudo apt-get install -y git curl python3 openssl
 curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone https://github.com/skrtk98/rpz-ir-sensor-api.git /home/ops/rpz-ir-sensor-api
-cd /home/ops/rpz-ir-sensor-api
-/home/ops/.local/bin/uv sync --locked --no-dev
+sudo install -d -o "$USER" -g "$USER" -m 755 /opt/rpz-ir-sensor-api
+git clone https://github.com/skrtk98/rpz-ir-sensor-api.git /opt/rpz-ir-sensor-api
+cd /opt/rpz-ir-sensor-api
+UV_PYTHON_PREFERENCE=only-system ~/.local/bin/uv sync --locked --no-dev
 ```
 
-uvの導入方法は[公式ドキュメント](https://docs.astral.sh/uv/getting-started/installation/)を参照してください。
+uvの導入方法は[公式ドキュメント](https://docs.astral.sh/uv/getting-started/installation/)を参照してください。仮想環境はサービス用ユーザーから読める必要があるため、ホームディレクトリ内にインストールされるuv管理のPythonではなく、OS標準のPythonを使います。
 
 ### 2. ハードウェア設定
 
@@ -65,23 +65,30 @@ sudo reboot
 
 ```bash
 ls -l /dev/i2c-1 /dev/lirc*
-id ops
 ```
 
 ### 3. サービスの登録
 
-LIRCデバイスが存在する状態で実行します。`install.py`はboot設定やOSの再起動を行いません。
+LIRCデバイスが存在する状態で、デプロイ用ユーザーから実行します。`install.py`はboot設定やOSの再起動を行いません。
 
 ```bash
-cd /home/ops/rpz-ir-sensor-api
+cd /opt/rpz-ir-sensor-api
 sudo .venv/bin/python install.py
 ```
 
-この操作はudevルールとsystemd unitを配置し、サービスを有効化・起動・再起動します。udevはドライバー名で送受信を判定し、`/dev/rpz-ir-tx`と`/dev/rpz-ir-rx`を作成します。
+この操作は次のことを行い、最後にTLS証明書のフィンガープリントを表示します。
 
-設定ファイルがなければAPIキーを生成し、外付けBME280の`0x76`を設定します。既存の設定ファイルがあればAPIキー等は保持しますが、`RPZ_IR_TX`と`RPZ_IR_RX`は上記の固定デバイス名に書き直します。
+- `rpz-ir`グループとサービス用ユーザー`rpz-ir-sensor`を作成する（既にあれば何もしない）。
+- udevルールを配置し、`/dev/rpz-ir-tx`と`/dev/rpz-ir-rx`を作成する。udevはドライバー名で送受信を判定し、デバイスを`rpz-ir`グループだけが読み書きできるようにする。
+- 設定ファイルがなければ作成し、全権限用と読み取り用のAPIキーを生成する。既存の設定ファイルがあれば内容は保持し、読み取り用キーがなければ追加し、`RPZ_IR_TX`と`RPZ_IR_RX`は上記の固定デバイス名に書き直す。
+- TLS証明書がなければ生成する。
+- systemd unitを配置し、サービスを有効化・再起動する。
 
-外付けBME280がない場合は、次の「設定」を参照して`RPZ_BME280_ADDRESS=0x77`に変更してください。
+新規作成時の設定では、外付けBME280の`0x76`を使います。外付けBME280がない場合は、次の「設定」を参照して`RPZ_BME280_ADDRESS=0x77`に変更してください。
+
+### 旧構成（ホームディレクトリ配置）からの移行
+
+旧構成ではサービスがデプロイ用ユーザーで動き、ソースはそのホームディレクトリにありました。上記の手順1の`/opt`への配置と`uv sync`を行ってから、手順3を実行してください。既存のAPIキー、記録、保存済みIRコードは引き継がれます。動作を確認したら、旧ディレクトリを削除できます。サービスは`video`グループを使わなくなるため、デプロイ用ユーザーを`i2c`・`video`グループに入れておく必要もありません。
 
 ## 設定
 
@@ -90,6 +97,7 @@ sudo .venv/bin/python install.py
 | 環境変数 | 未指定時の動作・値 | 生成する設定 |
 |---|---|---|
 | `RPZ_API_KEY` | 保護対象APIは503 | ランダムに生成 |
+| `RPZ_READ_API_KEY` | 読み取り専用キーなし | ランダムに生成 |
 | `RPZ_DB` | 作業ディレクトリ内の`data/codes.sqlite3` | `/var/lib/rpz-ir-sensor-api/codes.sqlite3` |
 | `RPZ_BME280_ADDRESS` | `0x77`（基板上） | `0x76`（外付け） |
 | `RPZ_IR_TX` | `/dev/lirc0` | `/dev/rpz-ir-tx` |
@@ -97,33 +105,41 @@ sudo .venv/bin/python install.py
 | `RPZ_SAMPLE_SECONDS` | `60`（`0`で記録停止） | 設定しない |
 | `RPZ_RETENTION_DAYS` | `90` | 設定しない |
 
-現在の実機では外付けセンサーの`0x76`を設定しています。基板上の`0x77`はRaspberry Pi本体の発熱の影響を受けます。`/sensors/environment`ではクエリでどちらも指定できます。
+基板上の`0x77`はRaspberry Pi本体の発熱の影響を受けます。`/sensors/environment`ではクエリでどちらも指定できます。
 
-systemdは設定ファイルを起動時に読み込みます。設定変更後はサービスを再起動してください。DBの保存先を変更する場合は、unitの`ReadWritePaths`と書き込み権限も調整する必要があります。待受アドレス・ポートはunitの`ExecStart`で指定します。
+systemdは設定ファイルを起動時に読み込みます。設定変更後はサービスを再起動してください。サービスが書き込めるのは`/var/lib/rpz-ir-sensor-api`（unitの`StateDirectory`）だけなので、DBはその中に置いてください。待受アドレス・ポートはunitの`ExecStart`で指定します。
 
 ## APIの利用
 
-`/health`とAPIドキュメントを除くAPIには`X-API-Key`ヘッダーが必要です。キー未指定・不一致は401、サーバー側のキー未設定は503です。Swagger UIでは「Authorize」から設定ファイルのAPIキーを入力します。
+`/health`、ダッシュボード、APIドキュメントを除くAPIには`X-API-Key`ヘッダーが必要です。キーは2種類あります。
 
-以下はSSH先の`ops`ユーザーで実行する例です。
+| キー | 使えるAPI |
+|---|---|
+| `RPZ_API_KEY` | すべて（IR受信・送信、保存コードの変更を含む） |
+| `RPZ_READ_API_KEY` | センサー値の取得（`/sensors`、`/sensors/environment`、`/sensors/light`、`/sensors/history`）のみ |
+
+キー未指定・不一致・権限外は401、サーバー側の`RPZ_API_KEY`未設定は503です。Swagger UIでは「Authorize」から設定ファイルのキーを入力します。
+
+以下は実機のデプロイ用ユーザーで実行する例です。
 
 ```bash
 . /etc/rpz-ir-sensor-api.env
-curl -H "X-API-Key: $RPZ_API_KEY" http://localhost:8000/sensors
-curl -H "X-API-Key: $RPZ_API_KEY" 'http://localhost:8000/sensors/environment?address=0x77'
+alias rpz='curl --cacert /etc/rpz-ir-sensor-api/tls.crt'
+rpz -H "X-API-Key: $RPZ_READ_API_KEY" https://localhost:8000/sensors
+rpz -H "X-API-Key: $RPZ_READ_API_KEY" 'https://localhost:8000/sensors/environment?address=0x77'
 ```
 
 IRの受信・保存は、次のコマンドの実行中にリモコンを受信機に向けて押してください。`name`を省略すると保存せずに波形を返します。**既存の名前を指定すると保存済みコードを上書きします。**
 
 ```bash
-curl -H "X-API-Key: $RPZ_API_KEY" -H 'Content-Type: application/json' \
-  -d '{"timeout_seconds":10,"name":"tv_power"}' http://localhost:8000/ir/receive
+rpz -H "X-API-Key: $RPZ_API_KEY" -H 'Content-Type: application/json' \
+  -d '{"timeout_seconds":10,"name":"tv_power"}' https://localhost:8000/ir/receive
 ```
 
 保存したコードの送信は家電を操作するため、送信先を確認して実行してください。
 
 ```bash
-curl -X POST -H "X-API-Key: $RPZ_API_KEY" http://localhost:8000/ir/codes/tv_power/send
+rpz -X POST -H "X-API-Key: $RPZ_API_KEY" https://localhost:8000/ir/codes/tv_power/send
 ```
 
 ### エンドポイント
@@ -151,29 +167,34 @@ IR操作同士とセンサー操作同士はそれぞれ排他制御し、競合
 
 ## ダッシュボード
 
-`http://<host>:8000/dashboard`（`/`からも転送）で、最新値と温度・湿度・気圧・照度の推移を表示します。表示のみで、IR操作はできません。
+`https://<host>:8000/dashboard`（`/`からも転送）で、最新値と温度・湿度・気圧・照度の推移を表示します。表示のみで、IR操作はできません。
 
 サービスは起動中、`RPZ_SAMPLE_SECONDS`ごとに`/sensors`と同じ値を`RPZ_DB`の`readings`テーブルへ記録し、`RPZ_RETENTION_DAYS`を過ぎた記録を削除します。片方のセンサーだけ失敗した場合は、その値を空として記録します。ダッシュボードは記録を読むだけで、センサーには直接アクセスしません。
 
-ページ自体は認証なしで配信しますが、データの取得にはAPIキーが必要です。初回に入力したキーはそのブラウザのlocalStorageに保存されます。このキーでIR送信も可能になるため、共有端末では使わないでください。グラフ描画には同梱の[uPlot](https://github.com/leeoniya/uPlot) 1.6.32（MIT、`static/vendor/`）を使い、外部CDNには依存しません。
+ページ自体は認証なしで配信しますが、データの取得には読み取り用キー`RPZ_READ_API_KEY`が必要です。入力したキーはそのブラウザのlocalStorageに保存されます。読み取り用キーではIR操作やコードの変更はできません。全権限用の`RPZ_API_KEY`はダッシュボードに入力しないでください。グラフ描画には同梱の[uPlot](https://github.com/leeoniya/uPlot) 1.6.32（MIT、`static/vendor/`）を使い、外部CDNには依存しません。
 
 ## 開発・運用
+
+以下は実機のデプロイ用ユーザーで実行します。
 
 ### 状態・ログの確認
 
 ```bash
 systemctl status rpz-ir-sensor-api --no-pager
 journalctl -u rpz-ir-sensor-api -n 100 --no-pager
-curl http://localhost:8000/health
+curl --cacert /etc/rpz-ir-sensor-api/tls.crt https://localhost:8000/health
 ```
 
 ### 開発用依存とチェック
 
+開発用依存を入れた仮想環境は、チェック後に`--no-dev`で戻してください。
+
 ```bash
-cd /home/ops/rpz-ir-sensor-api
-/home/ops/.local/bin/uv sync --locked
-/home/ops/.local/bin/uv run --locked pytest -q
-/home/ops/.local/bin/uv run --locked ruff check app.py tests
+cd /opt/rpz-ir-sensor-api
+~/.local/bin/uv sync --locked
+~/.local/bin/uv run --locked pytest -q
+~/.local/bin/uv run --locked ruff check app.py tests
+~/.local/bin/uv sync --locked --no-dev
 ```
 
 ### ソース更新
@@ -181,30 +202,30 @@ cd /home/ops/rpz-ir-sensor-api
 以下はソースと依存を更新し、サービスを再起動する操作です。
 
 ```bash
-cd /home/ops/rpz-ir-sensor-api
+cd /opt/rpz-ir-sensor-api
 git pull --ff-only
-/home/ops/.local/bin/uv sync --locked --no-dev
+~/.local/bin/uv sync --locked --no-dev
 sudo systemctl restart rpz-ir-sensor-api
 ```
 
 ### 設定変更後の再起動
 
+systemdは設定ファイルを起動時に読み込みます。
+
 ```bash
 sudo systemctl restart rpz-ir-sensor-api
 ```
 
-unit自体を変更した場合は、次の再登録を行います。
-
 ### unit・udevの再登録
 
-既存APIキーは保持しますが、IRデバイスの設定を書き直してサービスを再起動します。
+unitかudevルールを変更した場合に実行します。既存のAPIキーと証明書は保持し、IRデバイスの設定を書き直してサービスを再起動します。
 
 ```bash
-cd /home/ops/rpz-ir-sensor-api
+cd /opt/rpz-ir-sensor-api
 sudo .venv/bin/python install.py
 ```
 
-systemdは非rootの`ops`ユーザーと`i2c`/`video`グループで動作します。ハードウェアの競合防止のためuvicornは必ず1 workerで実行します。APIキーとSQLiteデータはGit対象外、`uv.lock`はGit管理対象です。
+サービスは専用ユーザー`rpz-ir-sensor`と`i2c`・`rpz-ir`グループで動作し、`/home`を参照できず、I2CとLIRC以外のデバイスにはアクセスできません。ハードウェアの競合防止のため、uvicornは必ず1 workerで実行します。APIキー、TLS鍵、SQLiteデータはGit対象外で、`uv.lock`はGit管理対象です。
 
 ## 参考
 
